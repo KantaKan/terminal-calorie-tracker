@@ -11,6 +11,7 @@ const LogSchema = new mongoose.Schema({
       name: { type: String, required: true },
       kcal: { type: Number, required: true },
       time: { type: String, required: true }, // Format "HH:mm"
+      timeSlot: { type: String, required: true },
     },
   ],
   totalKcal: {

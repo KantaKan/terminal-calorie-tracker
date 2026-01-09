@@ -5,7 +5,7 @@ import chalk from 'chalk';
 import boxen from 'boxen';
 import Fuse from 'fuse.js';
 import { connectDB, disconnectDB } from './db.js';
-import { getLocalDate, getCurrentTime } from './utils.js';
+import { getLocalDate, getCurrentTime, getTimeSlot } from './utils.js';
 import Log from './models/Log.js';
 import Food from './models/Food.js';
 import Config from './models/Config.js';
@@ -24,35 +24,33 @@ inquirer.registerPrompt('autocomplete', inquirerAutocompletePrompt);
 // In-memory cache for food data to make search instant
 let foodCache = [];
 
-let isRendering = false;
+const main = async () => {
+  await connectDB();
 
-const run = async () => {
-  // A simple lock to prevent concurrent renders from resize events
-  if (isRendering) return;
-  isRendering = true;
-
-  try {
-    // The main logic is now encapsulated in showDashboard
-    await showDashboard();
-  } catch (error) {
-    if (error.isTtyError) {
-      // Inquirer can throw this error if the environment is not a TTY.
-      // This can happen during resize or if run in a non-interactive shell.
-      // We can choose to ignore it or log it.
-      console.log('Caught a TTY error, possibly from resizing. Ignoring.');
-    } else {
-      console.error('An unexpected error occurred:', error);
-      await disconnectDB();
-      process.exit(1);
+  const loadFoodCache = async () => {
+    try {
+        foodCache = await Food.find({});
+        console.log(`\n${foodCache.length} food items loaded into memory for searching.`);
+    } catch (err) {
+        console.error('Failed to load food cache:', err.message);
     }
-  } finally {
-    isRendering = false;
+  }
+  await loadFoodCache();
+
+  // The main application loop. A simple while(true) is more stable.
+  while (true) {
+    try {
+      await showDashboard();
+    } catch (error) {
+      console.error("An unexpected error occurred in the main loop:", error);
+      // Optional: add a small delay or a prompt before continuing to prevent rapid-fire errors.
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
   }
 };
 
-
 const showDashboard = async () => {
-  process.stdout.write('\x1Bc'); // Clear console for better cross-platform compatibility
+  process.stdout.write('\x1Bc'); // Clear console
   const today = getLocalDate();
   
   const [log, config] = await Promise.all([
@@ -78,7 +76,7 @@ const showDashboard = async () => {
   if (log && log.entries.length > 0) {
     dashboardContent += `\n\n--- ${chalk.bold('Last 5 Meals')} ---\n`;
     log.entries.slice(-5).reverse().forEach(entry => {
-      dashboardContent += `  - ${entry.name} (${chalk.yellow(entry.kcal)} kcal) at ${entry.time}\n`;
+      dashboardContent += `  - (${chalk.cyan(entry.timeSlot)}) ${entry.name} (${chalk.yellow(entry.kcal)} kcal) at ${entry.time}\n`;
     });
   }
 
@@ -98,7 +96,9 @@ const showDashboard = async () => {
       message: 'What would you like to do?',
       choices: [
         { name: '➕ Add Meal', value: 'add' },
+        { name: '📖 View History', value: 'history' },
         { name: '⚙️  Set Daily Goal', value: 'goal' },
+        { name: '🔄 Refresh Dashboard', value: 'refresh' },
         new inquirer.Separator(),
         { name: '❌ Exit', value: 'exit' },
       ],
@@ -108,11 +108,15 @@ const showDashboard = async () => {
   switch (choice) {
     case 'add':
       await addMeal();
-      run(); // Continue the loop
+      break;
+    case 'history':
+      await viewHistory();
       break;
     case 'goal':
       await setDailyGoal();
-      run(); // Continue the loop
+      break;
+    case 'refresh':
+      // Simply breaking will cause the while loop to restart and redraw the UI.
       break;
     case 'exit':
       await disconnectDB();
@@ -127,6 +131,8 @@ const createProgressBar = (percentage, length) => {
 };
 
 const addMeal = async () => {
+  let foodToAdd = null;
+
   const fuse = new Fuse(foodCache, {
     keys: ['name'],
     includeScore: true,
@@ -158,53 +164,79 @@ const addMeal = async () => {
     return;
   }
 
-  if (foodId === 'CREATE_NEW') {
-    const answers = await inquirer.prompt([
-      { type: 'input', name: 'name', message: 'Food name:', validate: input => input.length > 0 || 'Please enter a name.' },
-      { 
-        type: 'input', 
-        name: 'kcalStr', 
-        message: 'Calories (kcal):', 
-        validate: input => {
-          const kcal = parseFloat(input);
-          return !isNaN(kcal) && kcal >= 0 || 'Please enter a valid number for calories.';
+    if (foodId === 'CREATE_NEW') {
+      const { name } = await inquirer.prompt([
+        { 
+          type: 'input', 
+          name: 'name', 
+          message: 'Enter food name (or type "cancel" to go back):',
+          validate: input => input.length > 0 || 'Please enter a name.'
         }
-      },
-    ]);
-    const name = answers.name;
-    const kcal = parseFloat(answers.kcalStr);
-    
-    try {
-      const newFood = new Food({ name, kcal });
-      const savedFood = await newFood.save();
-      foodCache.push(savedFood); // Update cache
-      await logMeal(savedFood);
-      console.log(chalk.green(`\n✅ Learned and added "${name}"!`));
-    } catch (error) {
-      if (error.code === 11000) { // Duplicate key error
-        console.log(chalk.red(`\nError: A food named "${name}" already exists.`));
-      } else {
-        console.log(chalk.red(`\nError saving new food: ${error.message}`));
+      ]);
+  
+      if (name.toLowerCase() === 'cancel') {
+          console.log(chalk.yellow('\nCreation cancelled.'));
+          return;
       }
-      await inquirer.prompt({ type: 'input', name: 'ack', message: 'Press Enter to continue...' });
+  
+      const { kcalStr } = await inquirer.prompt([
+        { 
+          type: 'input', 
+          name: 'kcalStr', 
+          message: `Calories (kcal) for "${name}":`,
+          validate: input => {
+            const kcal = parseFloat(input);
+            return !isNaN(kcal) && kcal >= 0 || 'Please enter a valid number for calories.';
+          }
+        },
+      ]);
+  
+      const kcal = parseFloat(kcalStr);
+      
+      try {
+        const newFood = new Food({ name, kcal });
+        foodToAdd = await newFood.save();
+        foodCache.push(foodToAdd); // Update cache
+        console.log(chalk.green(`\n✅ Learned "${name}"!`));
+      } catch (error) {
+        if (error.code === 11000) { // Duplicate key error
+          console.log(chalk.red(`\nError: A food named "${name}" already exists.`));
+        } else {
+          console.log(chalk.red(`\nError saving new food: ${error.message}`));
+        }
+        await inquirer.prompt({ type: 'input', name: 'ack', message: 'Press Enter to continue...' });
+        return; // Return to main menu on error
+      }
+    } else {
+      foodToAdd = foodCache.find(f => f._id.equals(foodId));
     }
-  } else {
-    const selectedFood = foodCache.find(f => f._id.equals(foodId));
-    if (selectedFood) {
-      await logMeal(selectedFood);
-      console.log(chalk.green(`\n✅ Added "${selectedFood.name}"!`));
-    }
+  if (foodToAdd) {
+    // --- Prompt for Time Slot ---
+    const { slot } = await inquirer.prompt([
+        {
+            type: 'list',
+            name: 'slot',
+            message: 'Which time slot for this meal?',
+            choices: ['Auto', 'Morning', 'Afternoon', 'Evening', 'Night'],
+            default: 'Auto',
+        }
+    ]);
+    
+    const timeSlot = slot === 'Auto' ? getTimeSlot() : slot;
+
+    await logMeal(foodToAdd, timeSlot);
+    console.log(chalk.green(`\n✅ Added "${foodToAdd.name}" to ${timeSlot}!`));
   }
 };
 
-const logMeal = async (food) => {
+const logMeal = async (food, timeSlot) => {
   const today = getLocalDate();
   const time = getCurrentTime();
 
   await Log.findOneAndUpdate(
     { date: today },
     {
-      $push: { entries: { name: food.name, kcal: food.kcal, time } },
+      $push: { entries: { name: food.name, kcal: food.kcal, time, timeSlot } },
       $inc: { totalKcal: food.kcal },
     },
     { upsert: true, new: true, setDefaultsOnInsert: true }
@@ -228,23 +260,224 @@ const setDailyGoal = async () => {
   console.log(chalk.green(`\nGoal updated to ${newGoal} kcal!`));
 };
 
-// --- Main Execution ---
-(async () => {
-    const loadFoodCache = async () => {
-        try {
-            foodCache = await Food.find({});
-            console.log(`\n${foodCache.length} food items loaded into memory for searching.`);
-        } catch (err) {
-            console.error('Failed to load food cache:', err.message);
-        }
+const viewHistory = async () => {
+    console.clear();
+    const logs = await Log.find({}).sort({ date: -1 });
+    const config = await Config.findOne({ key: 'user_settings' });
+    const dailyGoal = config ? config.dailyGoal : 2000;
+
+    if (logs.length === 0) {
+        console.log(chalk.yellow('No history found.'));
+        await inquirer.prompt({ type: 'input', name: 'ack', message: 'Press Enter to continue...' });
+        return;
     }
 
-    await connectDB();
-    await loadFoodCache();
+    const { date_to_view } = await inquirer.prompt([
+        {
+            type: 'list',
+            name: 'date_to_view',
+            message: 'Select a day to view:',
+            choices: [
+                ...logs.map(log => {
+                    const progress = (log.totalKcal / dailyGoal) * 100;
+                    const color = progress >= 100 ? chalk.red : progress > 75 ? chalk.yellow : chalk.green;
+                    return {
+                        name: color(`${log.date}  -  ${log.totalKcal} / ${dailyGoal} kcal`),
+                        value: log.date,
+                    }
+                }),
+                new inquirer.Separator(),
+                { name: '⬅️  Go Back', value: 'BACK' }
+            ],
+            loop: false,
+        }
+    ]);
 
-    // When the terminal is resized, debounce the event and re-run the main function.
-    process.stdout.on('resize', debounce(run, 200));
+    if (date_to_view !== 'BACK') {
+        await showDayDetail(date_to_view);
+    }
+};
 
-    // Initial run
-    run();
-})();
+const showDayDetail = async (dateString) => {
+    let stayOnPage = true;
+    while(stayOnPage) {
+        console.clear();
+        const log = await Log.findOne({ date: dateString });
+        
+        if (!log) {
+            console.log(chalk.yellow('Log for this day no longer exists.'));
+            await inquirer.prompt({ type: 'input', name: 'ack', message: 'Press Enter to continue...' });
+            stayOnPage = false;
+            break;
+        }
+
+        const config = await Config.findOne({ key: 'user_settings' });
+        const dailyGoal = config ? config.dailyGoal : 2000;
+        const progress = (log.totalKcal / dailyGoal) * 100;
+        const progressColor = progress >= 100 ? chalk.red : progress > 75 ? chalk.yellow : chalk.green;
+        const progressBar = createProgressBar(progress, 20);
+
+        let detailContent = '';
+        detailContent += chalk.bold(`📅 Date: ${log.date}\n`);
+        detailContent += `🔥 ${chalk.bold(log.totalKcal)} kcal / ${chalk.bold(dailyGoal)} kcal\n`;
+        detailContent += `📊 Progress: [${progressColor(progressBar)}] ${progress.toFixed(1)}%\n\n`;
+        detailContent += `--- ${chalk.bold('All Meals')} ---\n`;
+
+        log.entries.forEach((entry, index) => {
+            detailContent += `  ${chalk.grey(index + 1 + '.')} (${chalk.cyan(entry.timeSlot)}) ${entry.name} (${chalk.yellow(entry.kcal)} kcal) at ${entry.time}\n`;
+        });
+
+        console.log(boxen(detailContent, {
+            padding: 1,
+            margin: 1,
+            borderStyle: 'round',
+            title: 'Daily Log Details',
+            titleAlignment: 'center',
+        }));
+
+        const { choice } = await inquirer.prompt([{
+            type: 'list',
+            name: 'choice',
+            message: 'What would you like to do?',
+            choices: [
+                { name: '✏️  Edit an Entry', value: 'edit' },
+                { name: '🗑️  Delete an Entry', value: 'delete' },
+                new inquirer.Separator(),
+                { name: '⬅️  Go Back to History', value: 'back' },
+            ]
+        }]);
+
+        switch(choice) {
+            case 'edit':
+                await editEntry(log);
+                break;
+            case 'delete':
+                await deleteEntry(log);
+                break;
+            case 'back':
+                stayOnPage = false;
+                break;
+        }
+    }
+};
+
+const editEntry = async (log) => {
+    if (log.entries.length === 0) {
+        console.log(chalk.yellow('\nThere are no entries to edit.'));
+        await inquirer.prompt({ type: 'input', name: 'ack', message: 'Press Enter to continue...' });
+        return;
+    }
+
+    const { entryIdToEdit } = await inquirer.prompt([{
+        type: 'list',
+        name: 'entryIdToEdit',
+        message: 'Which entry would you like to edit?',
+        choices: [
+            ...log.entries.map((entry, index) => ({
+                name: `${index + 1}. (${entry.timeSlot}) ${entry.name} (${entry.kcal} kcal)`,
+                value: entry._id,
+            })),
+            new inquirer.Separator(),
+            { name: 'Cancel', value: 'CANCEL' },
+        ],
+        loop: false,
+    }]);
+
+    if (entryIdToEdit === 'CANCEL') {
+        return;
+    }
+
+    const entryToEdit = log.entries.find(e => e._id.equals(entryIdToEdit));
+    if (!entryToEdit) return;
+
+    const answers = await inquirer.prompt([
+        {
+            type: 'input',
+            name: 'newName',
+            message: 'Enter the new name:',
+            default: entryToEdit.name,
+        },
+        {
+            type: 'input',
+            name: 'newKcalStr',
+            message: 'Enter the new calories:',
+            default: entryToEdit.kcal,
+            validate: input => {
+                const kcal = parseFloat(input);
+                return !isNaN(kcal) && kcal >= 0 || 'Please enter a valid number for calories.';
+            }
+        }
+    ]);
+
+    const newName = answers.newName;
+    const newKcal = parseFloat(answers.newKcalStr);
+    const kcalDifference = newKcal - entryToEdit.kcal;
+
+    await Log.updateOne(
+        { _id: log._id },
+        {
+            $set: {
+                "entries.$[elem].name": newName,
+                "entries.$[elem].kcal": newKcal,
+            },
+            $inc: { totalKcal: kcalDifference }
+        },
+        {
+            arrayFilters: [{ "elem._id": entryIdToEdit }]
+        }
+    );
+    
+    console.log(chalk.green('\nEntry successfully updated.'));
+    await inquirer.prompt({ type: 'input', name: 'ack', message: 'Press Enter to continue...' });
+};
+
+const deleteEntry = async (log) => {
+    if (log.entries.length === 0) {
+        console.log(chalk.yellow('\nThere are no entries to delete.'));
+        await inquirer.prompt({ type: 'input', name: 'ack', message: 'Press Enter to continue...' });
+        return;
+    }
+
+    const { entryIdToDelete } = await inquirer.prompt([{
+        type: 'list',
+        name: 'entryIdToDelete',
+        message: 'Which entry would you like to delete?',
+        choices: [
+            ...log.entries.map((entry, index) => ({
+                name: `${index + 1}. (${entry.timeSlot}) ${entry.name} (${entry.kcal} kcal)`,
+                value: entry._id,
+            })),
+            new inquirer.Separator(),
+            { name: 'Cancel', value: 'CANCEL' },
+        ],
+        loop: false,
+    }]);
+
+    if (entryIdToDelete === 'CANCEL') {
+        return;
+    }
+
+    const { confirmDelete } = await inquirer.prompt([{
+        type: 'confirm',
+        name: 'confirmDelete',
+        message: 'Are you sure you want to delete this entry?',
+        default: false,
+    }]);
+
+    if (confirmDelete) {
+        const entryToDelete = log.entries.find(e => e._id.equals(entryIdToDelete));
+        if (entryToDelete) {
+            await Log.updateOne(
+                { _id: log._id },
+                {
+                    $pull: { entries: { _id: entryIdToDelete } },
+                    $inc: { totalKcal: -entryToDelete.kcal }
+                }
+            );
+            console.log(chalk.green('\nEntry successfully deleted.'));
+            await inquirer.prompt({ type: 'input', name: 'ack', message: 'Press Enter to continue...' });
+        }
+    }
+};
+
+main();
