@@ -11,102 +11,112 @@ import Food from './models/Food.js';
 import Config from './models/Config.js';
 import inquirerAutocompletePrompt from 'inquirer-autocomplete-prompt';
 
+const debounce = (func, timeout = 150) => {
+  let timer;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => { func.apply(this, args); }, timeout);
+  };
+};
+
 inquirer.registerPrompt('autocomplete', inquirerAutocompletePrompt);
 
 // In-memory cache for food data to make search instant
 let foodCache = [];
 
+let isRendering = false;
 
-const main = async () => {
-  await connectDB();
-  await loadFoodCache();
-  
-  // Main application loop
-  while (true) {
+const run = async () => {
+  // A simple lock to prevent concurrent renders from resize events
+  if (isRendering) return;
+  isRendering = true;
+
+  try {
+    // The main logic is now encapsulated in showDashboard
     await showDashboard();
+  } catch (error) {
+    if (error.isTtyError) {
+      // Inquirer can throw this error if the environment is not a TTY.
+      // This can happen during resize or if run in a non-interactive shell.
+      // We can choose to ignore it or log it.
+      console.log('Caught a TTY error, possibly from resizing. Ignoring.');
+    } else {
+      console.error('An unexpected error occurred:', error);
+      await disconnectDB();
+      process.exit(1);
+    }
+  } finally {
+    isRendering = false;
   }
 };
 
-const loadFoodCache = async () => {
-  try {
-    foodCache = await Food.find({});
-    console.log(`\n${foodCache.length} food items loaded into memory for searching.`);
-  } catch (err) {
-    console.error('Failed to load food cache:', err.message);
-  }
-}
 
 const showDashboard = async () => {
   process.stdout.write('\x1Bc'); // Clear console for better cross-platform compatibility
   const today = getLocalDate();
   
-  try {
-    const [log, config] = await Promise.all([
-      Log.findOne({ date: today }),
-      Config.findOne({ key: 'user_settings' })
-    ]);
+  const [log, config] = await Promise.all([
+    Log.findOne({ date: today }),
+    Config.findOne({ key: 'user_settings' })
+  ]);
 
-    const dailyGoal = config ? config.dailyGoal : 2000;
-    const currentKcal = log ? log.totalKcal : 0;
-    const remainingKcal = dailyGoal - currentKcal;
-    const progress = Math.min(100, (currentKcal / dailyGoal) * 100);
+  const dailyGoal = config ? config.dailyGoal : 2000;
+  const currentKcal = log ? log.totalKcal : 0;
+  const remainingKcal = dailyGoal - currentKcal;
+  const progress = Math.min(100, (currentKcal / dailyGoal) * 100);
 
-    // --- UI Rendering ---
-    const progressColor = progress >= 100 ? chalk.red : progress > 75 ? chalk.yellow : chalk.green;
-    const progressBar = createProgressBar(progress, 20);
+  // --- UI Rendering ---
+  const progressColor = progress >= 100 ? chalk.red : progress > 75 ? chalk.yellow : chalk.green;
+  const progressBar = createProgressBar(progress, 20);
 
-    let dashboardContent = '';
-    dashboardContent += chalk.bold(`📅 Date: ${today}\n`);
-    dashboardContent += `🔥 ${chalk.bold(currentKcal)} kcal / ${chalk.bold(dailyGoal)} kcal\n`;
-    dashboardContent += `📊 Progress: [${progressColor(progressBar)}] ${progress.toFixed(1)}%\n`;
-    dashboardContent += remainingKcal > 0 ? `✅ ${chalk.green.bold(remainingKcal)} kcal remaining` : `🚨 ${chalk.red.bold(Math.abs(remainingKcal))} kcal over goal`;
-    
-    // Last 5 Entries
-    if (log && log.entries.length > 0) {
-      dashboardContent += `\n\n--- ${chalk.bold('Last 5 Meals')} ---\n`;
-      log.entries.slice(-5).reverse().forEach(entry => {
-        dashboardContent += `  - ${entry.name} (${chalk.yellow(entry.kcal)} kcal) at ${entry.time}\n`;
-      });
-    }
+  let dashboardContent = '';
+  dashboardContent += chalk.bold(`📅 Date: ${today}\n`);
+  dashboardContent += `🔥 ${chalk.bold(currentKcal)} kcal / ${chalk.bold(dailyGoal)} kcal\n`;
+  dashboardContent += `📊 Progress: [${progressColor(progressBar)}] ${progress.toFixed(1)}%\n`;
+  dashboardContent += remainingKcal > 0 ? `✅ ${chalk.green.bold(remainingKcal)} kcal remaining` : `🚨 ${chalk.red.bold(Math.abs(remainingKcal))} kcal over goal`;
+  
+  if (log && log.entries.length > 0) {
+    dashboardContent += `\n\n--- ${chalk.bold('Last 5 Meals')} ---\n`;
+    log.entries.slice(-5).reverse().forEach(entry => {
+      dashboardContent += `  - ${entry.name} (${chalk.yellow(entry.kcal)} kcal) at ${entry.time}\n`;
+    });
+  }
 
-    console.log(boxen(dashboardContent, {
-      padding: 1,
-      margin: 1,
-      borderStyle: 'round',
-      title: 'CalTrack Terminal',
-      titleAlignment: 'center',
-    }));
+  console.log(boxen(dashboardContent, {
+    padding: 1,
+    margin: 1,
+    borderStyle: 'round',
+    title: 'CalTrack Terminal',
+    titleAlignment: 'center',
+  }));
 
-    // --- Menu ---
-    const { choice } = await inquirer.prompt([
-      {
-        type: 'list',
-        name: 'choice',
-        message: 'What would you like to do?',
-        choices: [
-          { name: '➕ Add Meal', value: 'add' },
-          { name: '⚙️  Set Daily Goal', value: 'goal' },
-          new inquirer.Separator(),
-          { name: '❌ Exit', value: 'exit' },
-        ],
-      },
-    ]);
+  // --- Menu ---
+  const { choice } = await inquirer.prompt([
+    {
+      type: 'list',
+      name: 'choice',
+      message: 'What would you like to do?',
+      choices: [
+        { name: '➕ Add Meal', value: 'add' },
+        { name: '⚙️  Set Daily Goal', value: 'goal' },
+        new inquirer.Separator(),
+        { name: '❌ Exit', value: 'exit' },
+      ],
+    },
+  ]);
 
-    switch (choice) {
-      case 'add':
-        await addMeal();
-        break;
-      case 'goal':
-        await setDailyGoal();
-        break;
-      case 'exit':
-        await disconnectDB();
-        process.exit(0);
-    }
-  } catch (err) {
-    console.error(err.message);
-    await disconnectDB();
-    process.exit(1);
+  switch (choice) {
+    case 'add':
+      await addMeal();
+      run(); // Continue the loop
+      break;
+    case 'goal':
+      await setDailyGoal();
+      run(); // Continue the loop
+      break;
+    case 'exit':
+      await disconnectDB();
+      process.exit(0);
   }
 };
 
@@ -136,11 +146,17 @@ const addMeal = async () => {
       
       return [
         { name: '➕ Create New Food', value: 'CREATE_NEW' },
+        { name: '❌ Cancel', value: 'CANCEL' },
         new inquirer.Separator(),
         ...searchResults,
       ];
     },
   });
+
+  if (foodId === 'CANCEL') {
+    console.log(chalk.yellow('\nAction cancelled.'));
+    return;
+  }
 
   if (foodId === 'CREATE_NEW') {
     const answers = await inquirer.prompt([
@@ -212,5 +228,23 @@ const setDailyGoal = async () => {
   console.log(chalk.green(`\nGoal updated to ${newGoal} kcal!`));
 };
 
+// --- Main Execution ---
+(async () => {
+    const loadFoodCache = async () => {
+        try {
+            foodCache = await Food.find({});
+            console.log(`\n${foodCache.length} food items loaded into memory for searching.`);
+        } catch (err) {
+            console.error('Failed to load food cache:', err.message);
+        }
+    }
 
-main();
+    await connectDB();
+    await loadFoodCache();
+
+    // When the terminal is resized, debounce the event and re-run the main function.
+    process.stdout.on('resize', debounce(run, 200));
+
+    // Initial run
+    run();
+})();

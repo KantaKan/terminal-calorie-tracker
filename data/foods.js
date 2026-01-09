@@ -40,6 +40,24 @@ const foods = [
   { name: 'Leo Beer', kcal: 145 },
   { name: 'Sticky Rice', kcal: 200 },
   { name: 'Jasmine Rice', kcal: 205 },
+  // --- New Additions ---
+  { name: 'Bamee Haeng (Dry Egg Noodles)', kcal: 400 },
+  { name: 'Kuay Jab (Rolled Noodle Soup)', kcal: 450 },
+  { name: 'Suki Nam (Thai Suki Soup)', kcal: 350 },
+  { name: 'Khao Kluk Kapi (Rice w/ Shrimp Paste)', kcal: 500 },
+  { name: 'Khao Mok Gai (Chicken Biryani)', kcal: 550 },
+  { name: 'Pad Prik Gaeng (Red Curry Stir-fry)', kcal: 500 },
+  { name: 'Yum Woon Sen (Glass Noodle Salad)', kcal: 180 },
+  { name: 'Gai Satay (Chicken Satay)', kcal: 300 },
+  { name: 'Tod Mun Pla (Fried Fish Cake)', kcal: 250 },
+  { name: 'Khao Niao Mamuang (Mango Sticky Rice)', kcal: 400 },
+  { name: 'Roti Gluay (Banana Roti)', kcal: 350 },
+  { name: 'Luk Chin Ping (Grilled Meatballs)', kcal: 150 },
+  { name: 'Cha Manao (Iced Lemon Tea)', kcal: 100 },
+  { name: 'Nam Anchan (Butterfly Pea Juice)', kcal: 90 },
+  { name: 'Oliang (Thai Iced Black Coffee)', kcal: 100 },
+  { name: 'Patongo (Chinese Doughnut)', kcal: 100 },
+  { name: 'Nam Tao Hoo (Soy Milk)', kcal: 80 },
 ];
 
 export default foods;
