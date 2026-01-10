@@ -16,12 +16,18 @@ const connectDB = async () => {
 
 const seedDatabase = async () => {
   try {
-    // Seed Food collection
-    const foodCount = await Food.countDocuments();
-    if (foodCount === 0) {
-      console.log('Food collection is empty. Seeding data...');
-      await Food.insertMany(seedFoods);
-      console.log('Food data seeded successfully.');
+    // Upsert seeding for Food collection
+    const existingFoods = await Food.find({}, 'name').lean();
+    const existingFoodNames = new Set(existingFoods.map(food => food.name));
+
+    const newFoodsToSeed = seedFoods.filter(seedFood => !existingFoodNames.has(seedFood.name));
+
+    if (newFoodsToSeed.length > 0) {
+      console.log(`Found ${newFoodsToSeed.length} new food items to seed. Seeding data...`);
+      await Food.insertMany(newFoodsToSeed);
+      console.log('New food data seeded successfully.');
+    } else {
+      console.log('Food database is up to date.');
     }
 
     // Ensure default config exists

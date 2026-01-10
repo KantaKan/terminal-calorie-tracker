@@ -2,13 +2,13 @@ import dotenv from 'dotenv';
 dotenv.config();
 import inquirer from 'inquirer';
 import chalk from 'chalk';
-import boxen from 'boxen';
 import Fuse from 'fuse.js';
 import { connectDB, disconnectDB } from './db.js';
 import { getLocalDate, getCurrentTime, getTimeSlot } from './utils.js';
 import Log from './models/Log.js';
 import Food from './models/Food.js';
 import Config from './models/Config.js';
+import Table from 'cli-table3';
 import inquirerAutocompletePrompt from 'inquirer-autocomplete-prompt';
 
 const debounce = (func, timeout = 150) => {
@@ -63,30 +63,50 @@ const showDashboard = async () => {
   const remainingKcal = dailyGoal - currentKcal;
   const progress = Math.min(100, (currentKcal / dailyGoal) * 100);
 
-  // --- UI Rendering ---
+  // --- UI Rendering with cli-table3 ---
   const progressColor = progress >= 100 ? chalk.red : progress > 75 ? chalk.yellow : chalk.green;
   const progressBar = createProgressBar(progress, 20);
 
-  let dashboardContent = '';
-  dashboardContent += chalk.bold(`📅 Date: ${today}\n`);
-  dashboardContent += `🔥 ${chalk.bold(currentKcal)} kcal / ${chalk.bold(dailyGoal)} kcal\n`;
-  dashboardContent += `📊 Progress: [${progressColor(progressBar)}] ${progress.toFixed(1)}%\n`;
-  dashboardContent += remainingKcal > 0 ? `✅ ${chalk.green.bold(remainingKcal)} kcal remaining` : `🚨 ${chalk.red.bold(Math.abs(remainingKcal))} kcal over goal`;
+  // Main container table that mimics boxen
+  const table = new Table({
+    chars: { 'top': '─' , 'top-mid': '┬' , 'top-left': '╭' , 'top-right': '╮'
+           , 'bottom': '─' , 'bottom-mid': '┴' , 'bottom-left': '╰' , 'bottom-right': '╯'
+           , 'left': '│' , 'left-mid': '├' , 'mid': '─' , 'mid-mid': '┼'
+           , 'right': '│' , 'right-mid': '┤' , 'middle': '│' },
+    style: { 'padding-left': 1, 'padding-right': 1, border: [], head: [] },
+  });
+
+  // Title Row
+  table.push(
+    [{ 
+      content: chalk.bold('CalTrack Terminal'), 
+      colSpan: 2, 
+      hAlign: 'center' 
+    }]
+  );
   
+  // Content Row
+  let statsContent = '';
+  statsContent += chalk.bold(`📅 Date: ${today}\n`);
+  statsContent += `🔥 ${chalk.bold(currentKcal)} kcal / ${chalk.bold(dailyGoal)} kcal\n`;
+  statsContent += `📊 Progress: [${progressColor(progressBar)}] ${progress.toFixed(1)}%\n`;
+  statsContent += remainingKcal > 0 ? `✅ ${chalk.green.bold(remainingKcal)} kcal remaining` : `🚨 ${chalk.red.bold(Math.abs(remainingKcal))} kcal over goal`;
+  
+  let mealsContent = `--- ${chalk.bold('Last 5 Meals')} ---\n`;
   if (log && log.entries.length > 0) {
-    dashboardContent += `\n\n--- ${chalk.bold('Last 5 Meals')} ---\n`;
     log.entries.slice(-5).reverse().forEach(entry => {
-      dashboardContent += `  - (${chalk.cyan(entry.timeSlot)}) ${entry.name} (${chalk.yellow(entry.kcal)} kcal) at ${entry.time}\n`;
+      mealsContent += `  - (${chalk.cyan(entry.timeSlot)}) ${entry.name} (${chalk.yellow(entry.kcal)} kcal)\n`;
     });
+  } else {
+    mealsContent += chalk.gray('  No meals logged yet today.');
   }
 
-  console.log(boxen(dashboardContent, {
-    padding: 1,
-    margin: 1,
-    borderStyle: 'round',
-    title: 'CalTrack Terminal',
-    titleAlignment: 'center',
-  }));
+  table.push([
+    { content: statsContent, vAlign: 'center' },
+    { content: mealsContent, vAlign: 'center' }
+  ]);
+
+  console.log(table.toString());
 
   // --- Menu ---
   const { choice } = await inquirer.prompt([
@@ -97,6 +117,8 @@ const showDashboard = async () => {
       choices: [
         { name: '➕ Add Meal', value: 'add' },
         { name: '📖 View History', value: 'history' },
+        { name: '📊 Weekly Report', value: 'report' },
+        { name: '🥑 Food Management', value: 'food' },
         { name: '⚙️  Set Daily Goal', value: 'goal' },
         { name: '🔄 Refresh Dashboard', value: 'refresh' },
         new inquirer.Separator(),
@@ -112,6 +134,12 @@ const showDashboard = async () => {
     case 'history':
       await viewHistory();
       break;
+    case 'report':
+      await showWeeklyReport();
+      break;
+    case 'food':
+      await manageFoods();
+      break;
     case 'goal':
       await setDailyGoal();
       break;
@@ -124,10 +152,111 @@ const showDashboard = async () => {
   }
 };
 
+const showWeeklyReport = async () => {
+    console.clear();
+    console.log(chalk.bold.cyan('\n--- 📊 Weekly Report ---'));
+
+    const today = new Date();
+    const weekDates = [];
+    const weekData = new Map();
+
+    for (let i = 6; i >= 0; i--) {
+        const date = new Date();
+        date.setDate(today.getDate() - i);
+        const dateString = date.toLocaleDateString('en-CA');
+        weekDates.push(dateString);
+        weekData.set(dateString, 0);
+    }
+
+    const startDate = weekDates[0];
+    const logs = await Log.find({ date: { $gte: startDate } });
+
+    logs.forEach(log => {
+        if (weekData.has(log.date)) {
+            weekData.set(log.date, log.totalKcal);
+        }
+    });
+
+    const weeklyTotal = logs.reduce((sum, log) => sum + log.totalKcal, 0);
+    const weeklyAverage = logs.length > 0 ? weeklyTotal / logs.length : 0;
+
+    console.log(`\n${chalk.bold('Weekly Summary:')}`);
+    console.log(`  - Total Calories: ${chalk.yellow(weeklyTotal.toFixed(0))} kcal`);
+    console.log(`  - Average Daily Calories: ${chalk.yellow(weeklyAverage.toFixed(0))} kcal\n`);
+
+    const chartTable = new Table({
+        head: [chalk.bold('Date'), chalk.bold('Calories'), ''],
+        colWidths: [15, 30, 10],
+    });
+
+    const maxKcal = Math.max(...weekData.values(), 1);
+
+    for (const date of weekDates) {
+        const kcal = weekData.get(date);
+        const barLength = Math.round((kcal / maxKcal) * 25);
+        const bar = '█'.repeat(barLength);
+        chartTable.push([
+            date,
+            bar,
+            chalk.yellow(`${kcal} kcal`)
+        ]);
+    }
+
+    console.log(chartTable.toString());
+
+    await inquirer.prompt({ type: 'input', name: 'ack', message: '\nPress Enter to continue...' });
+};
+
 const createProgressBar = (percentage, length) => {
   const filledLength = Math.round((percentage / 100) * length);
   const emptyLength = length - filledLength;
   return '█'.repeat(filledLength) + '░'.repeat(emptyLength);
+};
+
+const createNewFood = async () => {
+    const { name } = await inquirer.prompt([
+      { 
+        type: 'input', 
+        name: 'name', 
+        message: 'Enter food name (or type "cancel" to go back):',
+        validate: input => input.length > 0 || 'Please enter a name.'
+      }
+    ]);
+
+    if (name.toLowerCase() === 'cancel') {
+        console.log(chalk.yellow('\nCreation cancelled.'));
+        return null;
+    }
+
+    const { kcalStr } = await inquirer.prompt([
+      { 
+        type: 'input', 
+        name: 'kcalStr', 
+        message: `Calories (kcal) for "${name}":`,
+        validate: input => {
+          const kcal = parseFloat(input);
+          return !isNaN(kcal) && kcal >= 0 || 'Please enter a valid number for calories.';
+        }
+      },
+    ]);
+
+    const kcal = parseFloat(kcalStr);
+    
+    try {
+      const newFood = new Food({ name, kcal });
+      const savedFood = await newFood.save();
+      foodCache.push(savedFood); // Update cache
+      console.log(chalk.green(`\n✅ Learned "${name}"!`));
+      return savedFood;
+    } catch (error) {
+      if (error.code === 11000) { // Duplicate key error
+        console.log(chalk.red(`\nError: A food named "${name}" already exists.`));
+      } else {
+        console.log(chalk.red(`\nError saving new food: ${error.message}`));
+      }
+      await inquirer.prompt({ type: 'input', name: 'ack', message: 'Press Enter to continue...' });
+      return null; // Return null on error
+    }
 };
 
 const addMeal = async () => {
@@ -164,52 +293,13 @@ const addMeal = async () => {
     return;
   }
 
-    if (foodId === 'CREATE_NEW') {
-      const { name } = await inquirer.prompt([
-        { 
-          type: 'input', 
-          name: 'name', 
-          message: 'Enter food name (or type "cancel" to go back):',
-          validate: input => input.length > 0 || 'Please enter a name.'
-        }
-      ]);
-  
-      if (name.toLowerCase() === 'cancel') {
-          console.log(chalk.yellow('\nCreation cancelled.'));
-          return;
-      }
-  
-      const { kcalStr } = await inquirer.prompt([
-        { 
-          type: 'input', 
-          name: 'kcalStr', 
-          message: `Calories (kcal) for "${name}":`,
-          validate: input => {
-            const kcal = parseFloat(input);
-            return !isNaN(kcal) && kcal >= 0 || 'Please enter a valid number for calories.';
-          }
-        },
-      ]);
-  
-      const kcal = parseFloat(kcalStr);
-      
-      try {
-        const newFood = new Food({ name, kcal });
-        foodToAdd = await newFood.save();
-        foodCache.push(foodToAdd); // Update cache
-        console.log(chalk.green(`\n✅ Learned "${name}"!`));
-      } catch (error) {
-        if (error.code === 11000) { // Duplicate key error
-          console.log(chalk.red(`\nError: A food named "${name}" already exists.`));
-        } else {
-          console.log(chalk.red(`\nError saving new food: ${error.message}`));
-        }
-        await inquirer.prompt({ type: 'input', name: 'ack', message: 'Press Enter to continue...' });
-        return; // Return to main menu on error
-      }
-    } else {
-      foodToAdd = foodCache.find(f => f._id.equals(foodId));
-    }
+  if (foodId === 'CREATE_NEW') {
+    foodToAdd = await createNewFood();
+    if (!foodToAdd) return; // If creation was cancelled or failed, stop.
+  } else {
+    foodToAdd = foodCache.find(f => f._id.equals(foodId));
+  }
+
   if (foodToAdd) {
     // --- Prompt for Time Slot ---
     const { slot } = await inquirer.prompt([
@@ -281,8 +371,9 @@ const viewHistory = async () => {
                 ...logs.map(log => {
                     const progress = (log.totalKcal / dailyGoal) * 100;
                     const color = progress >= 100 ? chalk.red : progress > 75 ? chalk.yellow : chalk.green;
+                    const totalKcalStr = String(log.totalKcal).padStart(5);
                     return {
-                        name: color(`${log.date}  -  ${log.totalKcal} / ${dailyGoal} kcal`),
+                        name: color(`${log.date}  -  ${totalKcalStr} / ${dailyGoal} kcal`),
                         value: log.date,
                     }
                 }),
@@ -315,25 +406,39 @@ const showDayDetail = async (dateString) => {
         const dailyGoal = config ? config.dailyGoal : 2000;
         const progress = (log.totalKcal / dailyGoal) * 100;
         const progressColor = progress >= 100 ? chalk.red : progress > 75 ? chalk.yellow : chalk.green;
-        const progressBar = createProgressBar(progress, 20);
+        const progressBar = createProgressBar(progress, 2.0);
 
-        let detailContent = '';
-        detailContent += chalk.bold(`📅 Date: ${log.date}\n`);
-        detailContent += `🔥 ${chalk.bold(log.totalKcal)} kcal / ${chalk.bold(dailyGoal)} kcal\n`;
-        detailContent += `📊 Progress: [${progressColor(progressBar)}] ${progress.toFixed(1)}%\n\n`;
-        detailContent += `--- ${chalk.bold('All Meals')} ---\n`;
-
-        log.entries.forEach((entry, index) => {
-            detailContent += `  ${chalk.grey(index + 1 + '.')} (${chalk.cyan(entry.timeSlot)}) ${entry.name} (${chalk.yellow(entry.kcal)} kcal) at ${entry.time}\n`;
+        // --- Header ---
+        let summaryContent = '';
+        summaryContent += chalk.bold(`📅 Daily Log for: ${log.date}\n`);
+        summaryContent += `🔥 ${chalk.bold(log.totalKcal)} kcal / ${chalk.bold(dailyGoal)} kcal\n`;
+        summaryContent += `📊 Progress: [${progressColor(progressBar)}] ${progress.toFixed(1)}%\n`;
+        console.log(summaryContent);
+        
+        // --- Meals Table ---
+        const mealsTable = new Table({
+            head: [
+                chalk.bold('#'), 
+                chalk.bold('Time Slot'), 
+                chalk.bold('Name'), 
+                chalk.bold('Kcal'), 
+                chalk.bold('Time')
+            ],
+            colWidths: [5, 12, 30, 10, 10],
+            style: { head: ['cyan'] }
         });
 
-        console.log(boxen(detailContent, {
-            padding: 1,
-            margin: 1,
-            borderStyle: 'round',
-            title: 'Daily Log Details',
-            titleAlignment: 'center',
-        }));
+        log.entries.forEach((entry, index) => {
+            mealsTable.push([
+                index + 1,
+                entry.timeSlot,
+                entry.name,
+                chalk.yellow(entry.kcal),
+                entry.time,
+            ]);
+        });
+
+        console.log(mealsTable.toString());
 
         const { choice } = await inquirer.prompt([{
             type: 'list',
@@ -478,6 +583,218 @@ const deleteEntry = async (log) => {
             await inquirer.prompt({ type: 'input', name: 'ack', message: 'Press Enter to continue...' });
         }
     }
+};
+
+const manageFoods = async () => {
+    let stay = true;
+    while(stay) {
+        console.clear();
+        const { choice } = await inquirer.prompt([{
+            type: 'list',
+            name: 'choice',
+            message: '🥑 Food Management',
+            choices: [
+                { name: '📄 List All Foods', value: 'list' },
+                { name: '➕ Add a New Food', value: 'add' },
+                { name: '✏️  Edit a Food', value: 'edit' },
+                { name: '🗑️  Delete a Food', value: 'delete' },
+                new inquirer.Separator(),
+                { name: '⬅️  Go Back', value: 'back' },
+            ]
+        }]);
+
+        switch(choice) {
+            case 'list':
+                await listFoods();
+                break;
+            case 'add':
+                await addFood();
+                break;
+            case 'edit':
+                await editFood();
+                break;
+            case 'delete':
+                await deleteFood();
+                break;
+            case 'back':
+                stay = false;
+                break;
+        }
+    }
+}
+
+const listFoods = async () => { 
+    console.clear();
+    const table = new Table({
+        head: [chalk.bold('Name'), chalk.bold('Calories (kcal)')],
+        colWidths: [40, 20],
+    });
+
+    // Sort food by name alphabetically
+    const sortedFood = [...foodCache].sort((a, b) => a.name.localeCompare(b.name));
+
+    sortedFood.forEach(food => {
+        table.push([food.name, chalk.yellow(food.kcal)]);
+    });
+
+    console.log(chalk.bold.cyan('\n--- All Foods in Database ---'));
+    console.log(table.toString());
+
+    await inquirer.prompt({ type: 'input', name: 'ack', message: '\nPress Enter to continue...' });
+};
+const addFood = async () => { 
+    console.clear();
+    console.log(chalk.bold.cyan('\n--- Add a New Food ---'));
+    await createNewFood();
+    await inquirer.prompt({ type: 'input', name: 'ack', message: '\nPress Enter to continue...' });
+};
+const editFood = async () => { 
+    console.clear();
+    console.log(chalk.bold.cyan('\n--- Edit a Food ---'));
+
+    const fuse = new Fuse(foodCache, {
+        keys: ['name'],
+        includeScore: true,
+        threshold: 0.4,
+    });
+
+    const { foodIdToEdit } = await inquirer.prompt({
+        type: 'autocomplete',
+        name: 'foodIdToEdit',
+        message: 'Search for a food to edit:',
+        source: async (answersSoFar, input) => {
+            input = input || '';
+            const searchResults = fuse.search(input).map(result => ({
+                name: `${result.item.name} (${result.item.kcal} kcal)`,
+                value: result.item._id,
+            }));
+            return [
+                { name: '❌ Cancel', value: 'CANCEL' },
+                new inquirer.Separator(),
+                ...searchResults,
+            ];
+        },
+    });
+
+    if (foodIdToEdit === 'CANCEL') {
+        console.log(chalk.yellow('\nEdit cancelled.'));
+        await inquirer.prompt({ type: 'input', name: 'ack', message: 'Press Enter to continue...' });
+        return;
+    }
+
+    const foodToEdit = foodCache.find(f => f._id.equals(foodIdToEdit));
+    if (!foodToEdit) {
+        console.log(chalk.red('\nCould not find the selected food. It might have been deleted.'));
+        await inquirer.prompt({ type: 'input', name: 'ack', message: 'Press Enter to continue...' });
+        return;
+    }
+
+    const answers = await inquirer.prompt([
+        {
+            type: 'input',
+            name: 'newName',
+            message: 'Enter the new name:',
+            default: foodToEdit.name,
+        },
+        {
+            type: 'input',
+            name: 'newKcalStr',
+            message: 'Enter the new calories:',
+            default: foodToEdit.kcal,
+            validate: input => {
+                const kcal = parseFloat(input);
+                return !isNaN(kcal) && kcal >= 0 || 'Please enter a valid number for calories.';
+            }
+        }
+    ]);
+
+    const newName = answers.newName;
+    const newKcal = parseFloat(answers.newKcalStr);
+
+    try {
+        await Food.updateOne({ _id: foodToEdit._id }, {
+            $set: { name: newName, kcal: newKcal }
+        });
+
+        // Update cache
+        foodToEdit.name = newName;
+        foodToEdit.kcal = newKcal;
+
+        console.log(chalk.green('\n✅ Food successfully updated!'));
+    } catch (error) {
+        if (error.code === 11000) { // Duplicate key error
+            console.log(chalk.red(`\nError: A food named "${newName}" already exists.`));
+        } else {
+            console.log(chalk.red(`\nError updating food: ${error.message}`));
+        }
+    }
+    
+    await inquirer.prompt({ type: 'input', name: 'ack', message: 'Press Enter to continue...' });
+};
+const deleteFood = async () => { 
+    console.clear();
+    console.log(chalk.bold.cyan('\n--- Delete a Food ---'));
+
+    const fuse = new Fuse(foodCache, {
+        keys: ['name'],
+        includeScore: true,
+        threshold: 0.4,
+    });
+
+    const { foodIdToDelete } = await inquirer.prompt({
+        type: 'autocomplete',
+        name: 'foodIdToDelete',
+        message: 'Search for a food to delete:',
+        source: async (answersSoFar, input) => {
+            input = input || '';
+            const searchResults = fuse.search(input).map(result => ({
+                name: `${result.item.name} (${result.item.kcal} kcal)`,
+                value: result.item._id,
+            }));
+            return [
+                { name: '❌ Cancel', value: 'CANCEL' },
+                new inquirer.Separator(),
+                ...searchResults,
+            ];
+        },
+    });
+
+    if (foodIdToDelete === 'CANCEL') {
+        console.log(chalk.yellow('\nDeletion cancelled.'));
+        await inquirer.prompt({ type: 'input', name: 'ack', message: 'Press Enter to continue...' });
+        return;
+    }
+
+    const foodToDelete = foodCache.find(f => f._id.equals(foodIdToDelete));
+    if (!foodToDelete) {
+        console.log(chalk.red('\nCould not find the selected food. It might have been deleted already.'));
+        await inquirer.prompt({ type: 'input', name: 'ack', message: 'Press Enter to continue...' });
+        return;
+    }
+
+    const { confirmDelete } = await inquirer.prompt([{
+        type: 'confirm',
+        name: 'confirmDelete',
+        message: `Are you sure you want to delete "${foodToDelete.name}"? This action cannot be undone.`,
+        default: false,
+    }]);
+
+    if (confirmDelete) {
+        try {
+            await Food.deleteOne({ _id: foodToDelete._id });
+            
+            // Update cache
+            foodCache = foodCache.filter(f => !f._id.equals(foodToDelete._id));
+
+            console.log(chalk.green(`\n🗑️ "${foodToDelete.name}" has been deleted.`));
+        } catch (error) {
+            console.log(chalk.red(`\nError deleting food: ${error.message}`));
+        }
+    } else {
+        console.log(chalk.yellow('\nDeletion cancelled.'));
+    }
+
+    await inquirer.prompt({ type: 'input', name: 'ack', message: 'Press Enter to continue...' });
 };
 
 main();
