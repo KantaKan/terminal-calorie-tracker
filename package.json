@@ -16,6 +16,7 @@
     "cli-table3": "^0.6.5",
     "dotenv": "^17.2.3",
     "fuse.js": "^7.1.0",
+    "gradient-string": "^3.0.0",
     "inquirer": "^9.2.20",
     "inquirer-autocomplete-prompt": "^3.0.1",
     "mongoose": "^9.1.2"

@@ -49,80 +49,203 @@ const main = async () => {
   }
 };
 
+import boxen from 'boxen';
+import gradient from 'gradient-string';
+
+const calculateStreak = async (dailyGoal) => {
+    let streak = 0;
+    const today = new Date();
+    today.setHours(0,0,0,0);
+    
+    // Check backwards from Yesterday
+    for (let i = 1; i < 365; i++) { // Check up to a year back
+        const historyDate = new Date(today);
+        historyDate.setDate(today.getDate() - i);
+        const dateStr = historyDate.toISOString().split('T')[0];
+
+        const log = await Log.findOne({ date: dateStr });
+        if (log && log.totalKcal <= dailyGoal && log.totalKcal > 0) {
+            streak++;
+        } else {
+            break; // Streak broken
+        }
+    }
+    
+    // Check Today (if goal met, add to streak)
+    const todayDate = getLocalDate();
+    const todayLog = await Log.findOne({ date: todayDate });
+    if (todayLog && todayLog.totalKcal <= dailyGoal) {
+         if (todayLog.totalKcal > 0) streak++;
+    }
+    
+    return streak;
+};
+
+// Simple helper for a delay
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+const animateStartup = async () => {
+    const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    let i = 0;
+    const loader = setInterval(() => {
+        process.stdout.write(`\r${chalk.cyan(frames[i++ % frames.length])} Loading your profile...`);
+    }, 80);
+    
+    await sleep(1000);
+    clearInterval(loader);
+    process.stdout.write('\r' + ' '.repeat(30) + '\r'); // Clear line
+};
+
+// Variable to only run animation once per session
+let hasAnimated = false;
+
+const getWeeklyChartData = async (dailyGoal) => {
+    const today = new Date();
+    const dayOfWeek = today.getDay(); // 0(Sun) - 6(Sat)
+    
+    // Calculate Monday of this week
+    const diff = today.getDate() - dayOfWeek + (dayOfWeek === 0 ? -6 : 1);
+    const monday = new Date(today);
+    monday.setDate(diff);
+
+    const chartData = [];
+    let weeklyTotal = 0;
+    
+    for (let i = 0; i < 7; i++) {
+        const d = new Date(monday);
+        d.setDate(monday.getDate() + i);
+        const dateStr = d.toISOString().split('T')[0];
+        const dayName = d.toLocaleDateString('en-US', { weekday: 'short' }); 
+
+        const log = await Log.findOne({ date: dateStr });
+        const kcal = log ? log.totalKcal : 0;
+        
+        chartData.push({ day: dayName, kcal, date: dateStr });
+        weeklyTotal += kcal;
+    }
+
+    return { chartData, weeklyTotal };
+};
+
 const showDashboard = async () => {
+  if (!hasAnimated) {
+      process.stdout.write('\x1Bc'); // Clear console
+      await animateStartup();
+      hasAnimated = true;
+  }
+  
   process.stdout.write('\x1Bc'); // Clear console
   const today = getLocalDate();
   
-  const [log, config] = await Promise.all([
+  const config = await Config.findOne({ key: 'user_settings' });
+  const dailyGoal = config ? config.dailyGoal : 2000;
+  
+  const [log, { chartData, weeklyTotal }, streak] = await Promise.all([
     Log.findOne({ date: today }),
-    Config.findOne({ key: 'user_settings' })
+    getWeeklyChartData(dailyGoal),
+    calculateStreak(dailyGoal)
   ]);
 
-  const dailyGoal = config ? config.dailyGoal : 2000;
   const currentKcal = log ? log.totalKcal : 0;
   const remainingKcal = dailyGoal - currentKcal;
   const progress = Math.min(100, (currentKcal / dailyGoal) * 100);
 
-  // --- UI Rendering with cli-table3 ---
-  const progressColor = progress >= 100 ? chalk.red : progress > 75 ? chalk.yellow : chalk.green;
+  // --- UI Rendering ---
+  const getProgressColor = (p) => p >= 100 ? chalk.red : p > 75 ? chalk.yellow : chalk.green;
   const progressBar = createProgressBar(progress, 20);
 
-  // Main container table that mimics boxen
   const table = new Table({
-    chars: { 'top': '─' , 'top-mid': '┬' , 'top-left': '╭' , 'top-right': '╮'
-           , 'bottom': '─' , 'bottom-mid': '┴' , 'bottom-left': '╰' , 'bottom-right': '╯'
-           , 'left': '│' , 'left-mid': '├' , 'mid': '─' , 'mid-mid': '┼'
-           , 'right': '│' , 'right-mid': '┤' , 'middle': '│' },
-    style: { 'padding-left': 1, 'padding-right': 1, border: [], head: [] },
+    chars: { 'top': '' , 'top-mid': '' , 'top-left': '' , 'top-right': ''
+           , 'bottom': '' , 'bottom-mid': '' , 'bottom-left': '' , 'bottom-right': ''
+           , 'left': '' , 'left-mid': '' , 'mid': '' , 'mid-mid': ''
+           , 'right': '' , 'right-mid': '' , 'middle': '   ' }, // Spacer
+    style: { 'padding-left': 0, 'padding-right': 0, border: [], head: [] },
   });
 
-  // Title Row
-  table.push(
-    [{ 
-      content: chalk.bold('CalTrack Terminal'), 
-      colSpan: 2, 
-      hAlign: 'center' 
-    }]
-  );
+  // -- Left Column: Daily Stats --
+  let dailyContent = chalk.bold.underline(`📅  Today (${today})\n\n`);
+  dailyContent += `💪  Goal:  ${chalk.bold(dailyGoal)} kcal\n`;
+  dailyContent += `🔥  Eaten: ${chalk.bold(currentKcal)} kcal\n`;
   
-  // Content Row
-  let statsContent = '';
-  statsContent += chalk.bold(`📅 Date: ${today}\n`);
-  statsContent += `🔥 ${chalk.bold(currentKcal)} kcal / ${chalk.bold(dailyGoal)} kcal\n`;
-  statsContent += `📊 Progress: [${progressColor(progressBar)}] ${progress.toFixed(1)}%\n`;
-  statsContent += remainingKcal > 0 ? `✅ ${chalk.green.bold(remainingKcal)} kcal remaining` : `🚨 ${chalk.red.bold(Math.abs(remainingKcal))} kcal over goal`;
+  const remainColor = remainingKcal >= 0 ? chalk.green : chalk.red;
+  const remainLabel = remainingKcal >= 0 ? "Remaining" : "Over by";
+  dailyContent += `${remainColor("●")}  ${remainLabel}: ${chalk.bold(Math.abs(remainingKcal))} kcal\n\n`;
   
-  let mealsContent = `--- ${chalk.bold('Last 5 Meals')} ---\n`;
-  if (log && log.entries.length > 0) {
-    log.entries.slice(-5).reverse().forEach(entry => {
-      mealsContent += `  - (${chalk.cyan(entry.timeSlot)}) ${entry.name} (${chalk.yellow(entry.kcal)} kcal)\n`;
-    });
-  } else {
-    mealsContent += chalk.gray('  No meals logged yet today.');
-  }
+  dailyContent += `Progress:\n[${getProgressColor(progress)(progressBar)}] ${progress.toFixed(0)}%\n\n`;
+  
+  const streakColor = streak > 3 ? chalk.red.bold : chalk.yellow.bold;
+  dailyContent += `🚀  ${chalk.italic('Current Streak:')} ${streakColor(streak + ' Days')}`;
+
+  // -- Right Column: Weekly Chart --
+  let chartContent = chalk.bold.underline(`📊  Weekly Stats\n\n`);
+  
+  chartData.forEach(d => {
+      const isToday = d.date === today;
+      const pct = Math.min(1.5, d.kcal / dailyGoal); 
+      const barLen = Math.floor(pct * 20); 
+      
+      let barChar = '█';
+      let barColor = chalk.green;
+      if (d.kcal > dailyGoal) barColor = chalk.red;
+      else if (d.kcal === 0) { barColor = chalk.gray; barChar = '·'; }
+      
+      const bar = barColor(barChar.repeat(d.kcal === 0 ? 1 : barLen));
+      const label = isToday ? chalk.bold.white(d.day) : chalk.gray(d.day);
+      const kcalLabel = d.kcal > 0 ? chalk.gray(`${d.kcal}`) : '';
+      
+      chartContent += `${label} ${bar} ${kcalLabel}\n`;
+  });
+  
+  chartContent += `\n${chalk.italic.gray('Weekly Total: ' + weeklyTotal + ' kcal')}`;
 
   table.push([
-    { content: statsContent, vAlign: 'center' },
-    { content: mealsContent, vAlign: 'center' }
+    { content: dailyContent, vAlign: 'top', width: 40 },
+    { content: chartContent, vAlign: 'top', width: 40 }
   ]);
+  
+  // -- Recent Meals --
+  let mealsContent = `\n${chalk.dim('────────────────────────────────────────────────────────')}\n\n`;
+  mealsContent += `${chalk.bold('🥣  Today\'s Logs')}\n`;
+  if (log && log.entries.length > 0) {
+    log.entries.slice(-5).reverse().forEach(entry => {
+      mealsContent += `  ${chalk.cyan('•')} ${chalk.white(entry.name.padEnd(25))} ${chalk.yellow((entry.kcal + ' kcal').padStart(10))}  ${chalk.dim(entry.timeSlot)}\n`;
+    });
+  } else {
+    mealsContent += chalk.gray('  No meals logged today.');
+  }
+  
+  table.push([{ content: mealsContent, colSpan: 2 }]);
 
-  console.log(table.toString());
+  // --- Wrap it all in Boxen ---
+  const appContent = table.toString();
+  const styledTitle = gradient.pastel('   CalTrack Terminal   ');
+  const finalOutput = `${styledTitle}\n\n${appContent}`;
+  
+  const boxedOutput = boxen(finalOutput, {
+      padding: 1,
+      margin: 1,
+      borderStyle: 'round',
+      borderColor: 'cyan',
+      textAlignment: 'center'
+  });
+  
+  console.log(boxedOutput);
 
   // --- Menu ---
   const { choice } = await inquirer.prompt([
     {
       type: 'list',
       name: 'choice',
-      message: 'What would you like to do?',
+      message: 'Menu:',
+      pageSize: 10,
       choices: [
-        { name: '➕ Add Meal', value: 'add' },
-        { name: '📖 View History', value: 'history' },
-        { name: '📊 Weekly Report', value: 'report' },
-        { name: '🥑 Food Management', value: 'food' },
-        { name: '⚙️  Set Daily Goal', value: 'goal' },
-        { name: '🔄 Refresh Dashboard', value: 'refresh' },
+        { name: '➕  Add Meal', value: 'add' },
+        { name: '🥑  Manage Foods', value: 'food' },
+        { name: '📜  History', value: 'history' },
+        { name: '📈  Weekly Report', value: 'report' },
+        { name: '🎯  Set Goal', value: 'goal' },
         new inquirer.Separator(),
-        { name: '❌ Exit', value: 'exit' },
+        { name: '👋  Exit', value: 'exit' },
       ],
     },
   ]);
@@ -144,7 +267,6 @@ const showDashboard = async () => {
       await setDailyGoal();
       break;
     case 'refresh':
-      // Simply breaking will cause the while loop to restart and redraw the UI.
       break;
     case 'exit':
       await disconnectDB();
