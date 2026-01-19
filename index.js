@@ -5,6 +5,7 @@ import chalk from 'chalk';
 import Fuse from 'fuse.js';
 import { connectDB, disconnectDB } from './db.js';
 import { getLocalDate, getCurrentTime, getTimeSlot } from './utils.js';
+import { estimateMacros } from './nutrition-utils.js';
 import Log from './models/Log.js';
 import Food from './models/Food.js';
 import Config from './models/Config.js';
@@ -147,6 +148,10 @@ const showDashboard = async () => {
   ]);
 
   const currentKcal = log ? log.totalKcal : 0;
+  const currentProtein = log ? log.totalProtein : 0;
+  const currentCarbs = log ? log.totalCarbs : 0;
+  const currentFat = log ? log.totalFat : 0;
+
   const remainingKcal = dailyGoal - currentKcal;
   const progress = Math.min(100, (currentKcal / dailyGoal) * 100);
 
@@ -166,13 +171,19 @@ const showDashboard = async () => {
   let dailyContent = chalk.bold.underline(`📅  Today (${today})\n\n`);
   dailyContent += `💪  Goal:  ${chalk.bold(dailyGoal)} kcal\n`;
   dailyContent += `🔥  Eaten: ${chalk.bold(currentKcal)} kcal\n`;
-  
+
   const remainColor = remainingKcal >= 0 ? chalk.green : chalk.red;
   const remainLabel = remainingKcal >= 0 ? "Remaining" : "Over by";
   dailyContent += `${remainColor("●")}  ${remainLabel}: ${chalk.bold(Math.abs(remainingKcal))} kcal\n\n`;
-  
+
+  // Macronutrient display
+  dailyContent += chalk.bold.underline('📊 Macros:\n');
+  dailyContent += `🥩 Protein: ${chalk.bold(currentProtein)}g\n`;
+  dailyContent += `🍞 Carbs:   ${chalk.bold(currentCarbs)}g\n`;
+  dailyContent += `🥑 Fat:     ${chalk.bold(currentFat)}g\n\n`;
+
   dailyContent += `Progress:\n[${getProgressColor(progress)(progressBar)}] ${progress.toFixed(0)}%\n\n`;
-  
+
   const streakColor = streak > 3 ? chalk.red.bold : chalk.yellow.bold;
   dailyContent += `🚀  ${chalk.italic('Current Streak:')} ${streakColor(streak + ' Days')}`;
 
@@ -209,11 +220,12 @@ const showDashboard = async () => {
   if (log && log.entries.length > 0) {
     log.entries.slice(-5).reverse().forEach(entry => {
       mealsContent += `  ${chalk.cyan('•')} ${chalk.white(entry.name.padEnd(25))} ${chalk.yellow((entry.kcal + ' kcal').padStart(10))}  ${chalk.dim(entry.timeSlot)}\n`;
+      mealsContent += `    ${chalk.gray(`  🥩${entry.protein}g | 🍞${entry.carbs}g | 🥑${entry.fat}g`)}\n`;
     });
   } else {
     mealsContent += chalk.gray('  No meals logged today.');
   }
-  
+
   table.push([{ content: mealsContent, colSpan: 2 }]);
 
   // --- Wrap it all in Boxen ---
@@ -337,9 +349,9 @@ const createProgressBar = (percentage, length) => {
 
 const createNewFood = async () => {
     const { name } = await inquirer.prompt([
-      { 
-        type: 'input', 
-        name: 'name', 
+      {
+        type: 'input',
+        name: 'name',
         message: 'Enter food name (or type "cancel" to go back):',
         validate: input => input.length > 0 || 'Please enter a name.'
       }
@@ -351,9 +363,9 @@ const createNewFood = async () => {
     }
 
     const { kcalStr } = await inquirer.prompt([
-      { 
-        type: 'input', 
-        name: 'kcalStr', 
+      {
+        type: 'input',
+        name: 'kcalStr',
         message: `Calories (kcal) for "${name}":`,
         validate: input => {
           const kcal = parseFloat(input);
@@ -362,13 +374,29 @@ const createNewFood = async () => {
       },
     ]);
 
+    const { category } = await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'category',
+        message: `What type of food is "${name}"?`,
+        choices: [
+          { name: 'Protein-heavy (chicken, fish, meat, eggs)', value: 'protein-heavy' },
+          { name: 'Carb-heavy (rice, pasta, bread, fruits)', value: 'carb-heavy' },
+          { name: 'Fat-heavy (oils, nuts, butter, avocado)', value: 'fat-heavy' },
+          { name: 'Mixed (balanced meals, snacks)', value: 'mixed' }
+        ],
+        default: 'mixed'
+      }
+    ]);
+
     const kcal = parseFloat(kcalStr);
-    
+    const { protein, carbs, fat } = estimateMacros(kcal, category);
+
     try {
-      const newFood = new Food({ name, kcal });
+      const newFood = new Food({ name, kcal, protein, carbs, fat, category });
       const savedFood = await newFood.save();
       foodCache.push(savedFood); // Update cache
-      console.log(chalk.green(`\n✅ Learned "${name}"!`));
+      console.log(chalk.green(`\n✅ Learned "${name}"! Estimated: ${protein}g protein, ${carbs}g carbs, ${fat}g fat`));
       return savedFood;
     } catch (error) {
       if (error.code === 11000) { // Duplicate key error
@@ -448,8 +476,23 @@ const logMeal = async (food, timeSlot) => {
   await Log.findOneAndUpdate(
     { date: today },
     {
-      $push: { entries: { name: food.name, kcal: food.kcal, time, timeSlot } },
-      $inc: { totalKcal: food.kcal },
+      $push: {
+        entries: {
+          name: food.name,
+          kcal: food.kcal,
+          protein: food.protein,
+          carbs: food.carbs,
+          fat: food.fat,
+          time,
+          timeSlot
+        }
+      },
+      $inc: {
+        totalKcal: food.kcal,
+        totalProtein: food.protein,
+        totalCarbs: food.carbs,
+        totalFat: food.fat
+      },
     },
     { upsert: true, new: true, setDefaultsOnInsert: true }
   );
@@ -540,13 +583,16 @@ const showDayDetail = async (dateString) => {
         // --- Meals Table ---
         const mealsTable = new Table({
             head: [
-                chalk.bold('#'), 
-                chalk.bold('Time Slot'), 
-                chalk.bold('Name'), 
-                chalk.bold('Kcal'), 
+                chalk.bold('#'),
+                chalk.bold('Time Slot'),
+                chalk.bold('Name'),
+                chalk.bold('Kcal'),
+                chalk.bold('Protein'),
+                chalk.bold('Carbs'),
+                chalk.bold('Fat'),
                 chalk.bold('Time')
             ],
-            colWidths: [5, 12, 30, 10, 10],
+            colWidths: [5, 12, 20, 8, 8, 8, 8, 8],
             style: { head: ['cyan'] }
         });
 
@@ -556,6 +602,9 @@ const showDayDetail = async (dateString) => {
                 entry.timeSlot,
                 entry.name,
                 chalk.yellow(entry.kcal),
+                chalk.blue(entry.protein),
+                chalk.magenta(entry.carbs),
+                chalk.red(entry.fat),
                 entry.time,
             ]);
         });
@@ -633,12 +682,30 @@ const editEntry = async (log) => {
                 const kcal = parseFloat(input);
                 return !isNaN(kcal) && kcal >= 0 || 'Please enter a valid number for calories.';
             }
+        },
+        {
+            type: 'list',
+            name: 'category',
+            message: 'What type of food is this?',
+            choices: [
+                { name: 'Protein-heavy (chicken, fish, meat, eggs)', value: 'protein-heavy' },
+                { name: 'Carb-heavy (rice, pasta, bread, fruits)', value: 'carb-heavy' },
+                { name: 'Fat-heavy (oils, nuts, butter, avocado)', value: 'fat-heavy' },
+                { name: 'Mixed (balanced meals, snacks)', value: 'mixed' }
+            ],
+            default: 'mixed'
         }
     ]);
 
     const newName = answers.newName;
     const newKcal = parseFloat(answers.newKcalStr);
+    const newCategory = answers.category;
+    const { protein, carbs, fat } = estimateMacros(newKcal, newCategory);
+
     const kcalDifference = newKcal - entryToEdit.kcal;
+    const proteinDifference = protein - entryToEdit.protein;
+    const carbsDifference = carbs - entryToEdit.carbs;
+    const fatDifference = fat - entryToEdit.fat;
 
     await Log.updateOne(
         { _id: log._id },
@@ -646,8 +713,16 @@ const editEntry = async (log) => {
             $set: {
                 "entries.$[elem].name": newName,
                 "entries.$[elem].kcal": newKcal,
+                "entries.$[elem].protein": protein,
+                "entries.$[elem].carbs": carbs,
+                "entries.$[elem].fat": fat,
             },
-            $inc: { totalKcal: kcalDifference }
+            $inc: {
+                totalKcal: kcalDifference,
+                totalProtein: proteinDifference,
+                totalCarbs: carbsDifference,
+                totalFat: fatDifference
+            }
         },
         {
             arrayFilters: [{ "elem._id": entryIdToEdit }]
@@ -698,7 +773,12 @@ const deleteEntry = async (log) => {
                 { _id: log._id },
                 {
                     $pull: { entries: { _id: entryIdToDelete } },
-                    $inc: { totalKcal: -entryToDelete.kcal }
+                    $inc: {
+                        totalKcal: -entryToDelete.kcal,
+                        totalProtein: -entryToDelete.protein,
+                        totalCarbs: -entryToDelete.carbs,
+                        totalFat: -entryToDelete.fat
+                    }
                 }
             );
             console.log(chalk.green('\nEntry successfully deleted.'));
@@ -745,18 +825,24 @@ const manageFoods = async () => {
     }
 }
 
-const listFoods = async () => { 
+const listFoods = async () => {
     console.clear();
     const table = new Table({
-        head: [chalk.bold('Name'), chalk.bold('Calories (kcal)')],
-        colWidths: [40, 20],
+        head: [chalk.bold('Name'), chalk.bold('Cal'), chalk.bold('Prot'), chalk.bold('Carb'), chalk.bold('Fat')],
+        colWidths: [30, 8, 8, 8, 8],
     });
 
     // Sort food by name alphabetically
     const sortedFood = [...foodCache].sort((a, b) => a.name.localeCompare(b.name));
 
     sortedFood.forEach(food => {
-        table.push([food.name, chalk.yellow(food.kcal)]);
+        table.push([
+            food.name,
+            chalk.yellow(food.kcal),
+            chalk.blue(food.protein),
+            chalk.magenta(food.carbs),
+            chalk.red(food.fat)
+        ]);
     });
 
     console.log(chalk.bold.cyan('\n--- All Foods in Database ---'));
@@ -827,22 +913,40 @@ const editFood = async () => {
                 const kcal = parseFloat(input);
                 return !isNaN(kcal) && kcal >= 0 || 'Please enter a valid number for calories.';
             }
+        },
+        {
+            type: 'list',
+            name: 'category',
+            message: 'What type of food is this?',
+            choices: [
+                { name: 'Protein-heavy (chicken, fish, meat, eggs)', value: 'protein-heavy' },
+                { name: 'Carb-heavy (rice, pasta, bread, fruits)', value: 'carb-heavy' },
+                { name: 'Fat-heavy (oils, nuts, butter, avocado)', value: 'fat-heavy' },
+                { name: 'Mixed (balanced meals, snacks)', value: 'mixed' }
+            ],
+            default: foodToEdit.category || 'mixed'
         }
     ]);
 
     const newName = answers.newName;
     const newKcal = parseFloat(answers.newKcalStr);
+    const newCategory = answers.category;
+    const { protein, carbs, fat } = estimateMacros(newKcal, newCategory);
 
     try {
         await Food.updateOne({ _id: foodToEdit._id }, {
-            $set: { name: newName, kcal: newKcal }
+            $set: { name: newName, kcal: newKcal, protein, carbs, fat, category: newCategory }
         });
 
         // Update cache
         foodToEdit.name = newName;
         foodToEdit.kcal = newKcal;
+        foodToEdit.protein = protein;
+        foodToEdit.carbs = carbs;
+        foodToEdit.fat = fat;
+        foodToEdit.category = newCategory;
 
-        console.log(chalk.green('\n✅ Food successfully updated!'));
+        console.log(chalk.green(`\n✅ Food successfully updated! Estimated: ${protein}g protein, ${carbs}g carbs, ${fat}g fat`));
     } catch (error) {
         if (error.code === 11000) { // Duplicate key error
             console.log(chalk.red(`\nError: A food named "${newName}" already exists.`));

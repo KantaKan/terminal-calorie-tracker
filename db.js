@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import Food from './models/Food.js';
 import Config from './models/Config.js';
+import { estimateMacros } from './nutrition-utils.js';
 import seedFoods from './data/foods.js';
 
 const connectDB = async () => {
@@ -24,7 +25,14 @@ const seedDatabase = async () => {
 
     if (newFoodsToSeed.length > 0) {
       console.log(`Found ${newFoodsToSeed.length} new food items to seed. Seeding data...`);
-      await Food.insertMany(newFoodsToSeed);
+
+      // Add macronutrients to new foods using estimation
+      const foodsWithMacros = newFoodsToSeed.map(food => {
+        const { protein, carbs, fat } = estimateMacros(food.kcal, 'mixed');
+        return { ...food, protein, carbs, fat, category: 'mixed' };
+      });
+
+      await Food.insertMany(foodsWithMacros);
       console.log('New food data seeded successfully.');
     } else {
       console.log('Food database is up to date.');
